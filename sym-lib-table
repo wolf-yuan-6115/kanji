@@ -1,0 +1,7 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "TPD2E001DZDR") (type "KiCad") (uri "${KIPRJMOD}/external/TPD2E001DZDR/TPD2E001DZDR.kicad_sym") (options "") (descr ""))
+	(lib (name "easyeda2kicad") (type "KiCad") (uri "${KIPRJMOD}/external/easyeda2kicad") (options "") (descr ""))
+	(lib (name "handmade") (type "KiCad") (uri "${KIPRJMOD}/external/handmade/handmade.kicad_sym") (options "") (descr ""))
+	(lib (name "seeed xiao") (type "KiCad") (uri "${KIPRJMOD}/external/XIAO_Series_SCH_Symbols/Seeed_Studio_XIAO_Series.kicad_sym") (options "") (descr ""))
+)
