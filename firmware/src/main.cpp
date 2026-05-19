@@ -18,6 +18,11 @@ namespace {
 constexpr int I2C_SDA_PIN = 5;
 constexpr int I2C_SCL_PIN = 6;
 constexpr uint32_t I2C_FREQ = 100000;
+constexpr uint8_t BH1750_ADDR = 0x23;
+constexpr uint32_t LIGHT_UPDATE_MS = 1000UL;
+constexpr float LIGHT_PRESENT_LUX = 10.0f;
+constexpr float LIGHT_ABSENT_LUX = 5.0f;
+constexpr uint32_t CLOCK_REFRESH_SECONDS = 5UL * 60UL;
 
 constexpr uint16_t DISPLAY_WIDTH = EPD_4IN26G_WIDTH;
 constexpr uint16_t DISPLAY_HEIGHT = EPD_4IN26G_HEIGHT;
@@ -26,8 +31,6 @@ constexpr uint16_t RIGHT_PANE_X = LEFT_PANE_WIDTH;
 constexpr uint16_t RIGHT_PANE_WIDTH = DISPLAY_WIDTH - LEFT_PANE_WIDTH;
 constexpr uint16_t RIGHT_BOTTOM_ZONE_HEIGHT = 120;
 constexpr uint16_t RIGHT_BOTTOM_Y = DISPLAY_HEIGHT - RIGHT_BOTTOM_ZONE_HEIGHT;
-
-constexpr uint32_t CLOCK_UPDATE_MS = 5UL * 60UL * 1000UL;
 constexpr uint32_t SENSOR_UPDATE_MS = 5UL * 60UL * 1000UL;
 constexpr uint32_t WEATHER_UPDATE_MS = 60UL * 60UL * 1000UL;
 constexpr uint32_t NTP_RESYNC_MS = 24UL * 60UL * 60UL * 1000UL;
@@ -55,14 +58,132 @@ Adafruit_SHT4x g_sht4;
 bool g_sensor_ok = false;
 WeatherData g_weather;
 SensorData g_sensor;
+bool g_light_sensor_ok = false;
+bool g_light_present = true;
+bool g_light_state_known = false;
+bool g_light_present_trigger = false;
+float g_light_lux = 0.0f;
 
-uint32_t g_last_clock_update = 0;
+uint32_t g_last_light_update = 0;
 uint32_t g_last_sensor_update = 0;
 uint32_t g_last_weather_update = 0;
 uint32_t g_last_ntp_sync = 0;
+time_t g_next_clock_refresh = 0;
+bool g_pending_render = false;
 
 tm g_timeinfo = {};
 bool g_time_ok = false;
+
+time_t nextFiveMinuteBoundary(time_t epoch) {
+  return ((epoch / static_cast<time_t>(CLOCK_REFRESH_SECONDS)) + 1) * static_cast<time_t>(CLOCK_REFRESH_SECONDS);
+}
+
+void scheduleNextClockRefresh() {
+  const time_t now_epoch = time(nullptr);
+  if (now_epoch > 0) {
+    g_next_clock_refresh = nextFiveMinuteBoundary(now_epoch);
+  }
+}
+
+void advanceNextClockRefresh(time_t now_epoch) {
+  if (g_next_clock_refresh == 0) {
+    return;
+  }
+
+  while (g_next_clock_refresh <= now_epoch) {
+    g_next_clock_refresh += static_cast<time_t>(CLOCK_REFRESH_SECONDS);
+  }
+}
+
+bool bh1750WriteCommand(uint8_t command) {
+  Wire.beginTransmission(BH1750_ADDR);
+  Wire.write(command);
+  return Wire.endTransmission() == 0;
+}
+
+bool initLightSensor() {
+  g_last_light_update = millis();
+
+  Wire.beginTransmission(BH1750_ADDR);
+  if (Wire.endTransmission() != 0) {
+    g_light_sensor_ok = false;
+    return false;
+  }
+
+  if (!bh1750WriteCommand(0x01)) {
+    g_light_sensor_ok = false;
+    return false;
+  }
+
+  delay(5);
+
+  if (!bh1750WriteCommand(0x07)) {
+    g_light_sensor_ok = false;
+    return false;
+  }
+
+  delay(5);
+
+  if (!bh1750WriteCommand(0x10)) {
+    g_light_sensor_ok = false;
+    return false;
+  }
+
+  g_light_sensor_ok = true;
+  return true;
+}
+
+bool readLightSensor(float& lux_out) {
+  const uint8_t bytes_read = Wire.requestFrom(BH1750_ADDR, static_cast<uint8_t>(2));
+  if (bytes_read != 2) {
+    return false;
+  }
+
+  const uint16_t raw = (static_cast<uint16_t>(Wire.read()) << 8) | static_cast<uint16_t>(Wire.read());
+  lux_out = static_cast<float>(raw) / 1.2f;
+  return true;
+}
+
+bool pollLightSensor(uint32_t now_ms) {
+  if ((now_ms - g_last_light_update) < LIGHT_UPDATE_MS) {
+    return false;
+  }
+
+  g_last_light_update = now_ms;
+
+  if (!g_light_sensor_ok && !initLightSensor()) {
+    g_light_present = true;
+    g_light_state_known = false;
+    return false;
+  }
+
+  float lux = 0.0f;
+  if (!readLightSensor(lux)) {
+    g_light_sensor_ok = false;
+    g_light_present = true;
+    g_light_state_known = false;
+    return false;
+  }
+
+  g_light_lux = lux;
+  const bool was_present = g_light_present;
+
+  if (!g_light_state_known) {
+    g_light_present = lux >= LIGHT_PRESENT_LUX;
+    g_light_state_known = true;
+  } else if (lux >= LIGHT_PRESENT_LUX) {
+    g_light_present = true;
+  } else if (lux <= LIGHT_ABSENT_LUX) {
+    g_light_present = false;
+  }
+
+  if (!was_present && g_light_present) {
+    g_light_present_trigger = true;
+    g_pending_render = true;
+  }
+
+  return true;
+}
 
 void drawWeatherIcon(uint16_t x, uint16_t y, int code) {
   if (code == 113) {
@@ -198,6 +319,7 @@ bool syncTime() {
     if (getLocalTime(&g_timeinfo, 500)) {
       g_time_ok = true;
       g_last_ntp_sync = millis();
+      scheduleNextClockRefresh();
       return true;
     }
     delay(200);
@@ -274,6 +396,7 @@ bool readSensor() {
   g_sensor.humidity = humidity_event.relative_humidity;
   g_sensor.valid = true;
   g_last_sensor_update = millis();
+  g_pending_render = true;
   return true;
 }
 
@@ -298,7 +421,14 @@ void printStartupStatus() {
   Serial.printf("Framebuffer memory: %s\n", g_using_psram ? "PSRAM" : "INTERNAL");
   Serial.printf("WiFi connected: %s\n", WiFi.status() == WL_CONNECTED ? "yes" : "no");
   Serial.printf("SHT40 online: %s\n", g_sensor_ok ? "yes" : "no");
+  Serial.printf("BH1750 online: %s\n", g_light_sensor_ok ? "yes" : "no");
+  if (g_light_sensor_ok) {
+    Serial.printf("Light present: %s (%.1f lux)\n", g_light_present ? "yes" : "no", g_light_lux);
+  }
   Serial.printf("Time synced: %s\n", g_time_ok ? "yes" : "no");
+  if (g_next_clock_refresh != 0) {
+    Serial.printf("Next clock refresh: %lu\n", static_cast<unsigned long>(g_next_clock_refresh));
+  }
 }
 
 }  // namespace
@@ -319,6 +449,7 @@ void setup() {
   }
 
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, I2C_FREQ);
+  initLightSensor();
   g_sensor_ok = g_sht4.begin(&Wire);
   if (g_sensor_ok) {
     g_sht4.setPrecision(SHT4X_HIGH_PRECISION);
@@ -330,12 +461,15 @@ void setup() {
   syncTime();
   fetchWeather();
   refreshLocalTime();
+  if (g_time_ok) {
+    scheduleNextClockRefresh();
+  }
 
   printStartupStatus();
   renderAndFlush();
 
   const uint32_t now = millis();
-  g_last_clock_update = now;
+  g_last_light_update = now;
   if (g_last_sensor_update == 0) {
     g_last_sensor_update = now;
   }
@@ -357,26 +491,33 @@ void loop() {
     refreshLocalTime();
   }
 
-  bool should_render = false;
+  if ((now - g_last_light_update) >= LIGHT_UPDATE_MS) {
+    pollLightSensor(now);
+  }
 
   if ((now - g_last_sensor_update) >= SENSOR_UPDATE_MS) {
     readSensor();
-    should_render = true;
   }
 
   if ((now - g_last_weather_update) >= WEATHER_UPDATE_MS) {
     if (fetchWeather()) {
-      should_render = true;
+      g_pending_render = true;
     }
   }
 
-  if ((now - g_last_clock_update) >= CLOCK_UPDATE_MS) {
-    g_last_clock_update = now;
-    should_render = true;
+  if (g_time_ok && g_next_clock_refresh != 0) {
+    const time_t current_epoch = time(nullptr);
+    if (current_epoch >= g_next_clock_refresh) {
+      advanceNextClockRefresh(current_epoch);
+      g_pending_render = true;
+    }
   }
 
-  if (should_render) {
+  const bool light_gate_open = !g_light_sensor_ok || g_light_present;
+  if (g_light_present_trigger || (light_gate_open && g_pending_render)) {
     renderAndFlush();
+    g_pending_render = false;
+    g_light_present_trigger = false;
   }
 
   delay(500);
