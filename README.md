@@ -14,6 +14,10 @@ Case was not designed and it's intended to just directly use screw as stand.
 
 ![schematic](./assets/schematic.png)
 
+## Routing
+
+![routing](./assets/routing.png)
+
 ## BOM
 
 | Name | Qty | Total (USD) | Distributor |
