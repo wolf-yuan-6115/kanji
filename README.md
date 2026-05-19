@@ -23,7 +23,7 @@ Case was not designed and it's intended to just directly use screw as stand.
 | Name | Qty | Total (USD) | Distributor |
 | --- | --- | --- | --- |
 | WaveShare E-Ink display & Seeed Xiao ESP32-S3 | 1 | $35.00 | Taobao (Like Aliexpress but China version) |
-| PCB Assambly | 1 | $36.70 | JLCPCB |
-| PCB | 1 | $10.23 | JLCPCB |
+| PCB Assambly | 1 | $44.84 | JLCPCB |
+| PCB | 1 | $10.56 | JLCPCB |
 | Shipping | 1 | $6.12 | JLCPCB |
-| Total | 1 | $88.05 | - |
+| Total | 1 | $96.52 | - |
